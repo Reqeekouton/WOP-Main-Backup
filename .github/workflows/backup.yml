@@ -117,8 +117,8 @@ jobs:
         else
           git commit -m "自动备份网站 - ${{ steps.date.outputs.date }}"
           # 拉取最新更改并推送
-          git pull --rebase origin master
-          git push origin master
+          git pull --rebase origin main
+          git push origin main
         fi
         
     - name: 清理旧备份（保留最近30天的备份）

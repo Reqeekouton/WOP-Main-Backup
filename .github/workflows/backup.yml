@@ -1,0 +1,153 @@
+name: 自动备份网站
+
+on:
+  schedule:
+    - cron: '0 4 */7 * *'  # 每7天备份一次（凌晨4点 UTC）
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 安装 HTTrack
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y httrack webhttrack
+        
+    - name: 创建备份目录
+      run: |
+        mkdir -p backups
+        
+    - name: 设置日期变量
+      id: date
+      run: |
+        echo "date=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_OUTPUT
+        
+    - name: 创建临时目录
+      run: |
+        mkdir -p /tmp/httrack-backup
+        
+    - name: 执行 HTTrack 备份
+      run: |
+        BACKUP_DIR="/tmp/httrack-backup/write-on-paper-${{ steps.date.outputs.date }}"
+        mkdir -p "$BACKUP_DIR"
+        
+        cd /tmp/httrack-backup
+        
+        httrack "https://write-on-paper.wikidot.com/system:list-all-pages" -O "$BACKUP_DIR" \
+            --mirror \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --depth=3 \
+            --stay-on-same-domain \
+            --robots=0 \
+            --verbose
+            
+        echo "备份完成，保存在: $BACKUP_DIR"
+        
+    - name: 检查备份是否成功
+      run: |
+        BACKUP_DIR="/tmp/httrack-backup/write-on-paper-${{ steps.date.outputs.date }}"
+        
+        if [ -d "$BACKUP_DIR" ] && [ "$(ls -A $BACKUP_DIR)" ]; then
+          echo "备份成功，目录不为空"
+          ls -la "$BACKUP_DIR" | head -20
+        else
+          echo "备份可能失败，目录为空"
+          exit 1
+        fi
+        
+    - name: 压缩备份文件
+      run: |
+        cd /tmp/httrack-backup
+        BACKUP_NAME="write-on-paper-${{ steps.date.outputs.date }}"
+        
+        # 压缩备份
+        tar -czf "$GITHUB_WORKSPACE/backups/${BACKUP_NAME}.tar.gz" "$BACKUP_NAME"
+        
+        echo "压缩完成: ${BACKUP_NAME}.tar.gz"
+        
+    - name: 生成备份信息
+      run: |
+        cd $GITHUB_WORKSPACE/backups
+        BACKUP_FILE="write-on-paper-${{ steps.date.outputs.date }}.tar.gz"
+        
+        cat > backup_info_${{ steps.date.outputs.date }}.md << EOF
+        # 备份信息
+        
+        - **备份时间**: ${{ steps.date.outputs.date }}
+        - **备份文件**: ${BACKUP_FILE}
+        - **备份大小**: $(du -h ${BACKUP_FILE} | cut -f1)
+        - **网站**: https://write-on-paper.wikidot.com/
+        
+        ## 文件列表
+        
+        \`\`\`
+        $(tar -tzf ${BACKUP_FILE} | head -30)
+        \`\`\`
+        
+        *更多文件请解压查看*
+        EOF
+        
+    - name: 更新软链接
+      run: |
+        cd $GITHUB_WORKSPACE/backups
+        # 删除旧的软链接
+        rm -f latest-backup.tar.gz latest-backup-info.md
+        # 创建新的软链接
+        ln -s "write-on-paper-${{ steps.date.outputs.date }}.tar.gz" "latest-backup.tar.gz"
+        ln -s "backup_info_${{ steps.date.outputs.date }}.md" "latest-backup-info.md"
+        
+    - name: 提交备份到仓库
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # 添加所有备份文件
+        git add backups/
+        
+        # 检查是否有文件需要提交
+        if git diff --staged --quiet; then
+          echo "没有新的备份文件需要提交"
+        else
+          git commit -m "自动备份网站 - ${{ steps.date.outputs.date }}"
+          # 拉取最新更改并推送
+          git pull --rebase origin master
+          git push origin master
+        fi
+        
+    - name: 清理旧备份（保留最近30天的备份）
+      run: |
+        cd $GITHUB_WORKSPACE/backups
+        # 删除30天前的备份文件
+        find . -name "write-on-paper-*.tar.gz" -type f -mtime +30 -delete
+        # 删除30天前的信息文件
+        find . -name "backup_info_*.md" -type f -mtime +30 -delete
+        # 删除30天前的软链接（但保留latest链接）
+        find . -name "latest-*" -type l -mtime +30 -delete
+        
+    - name: 上传备份文件作为工作流附件
+      uses: actions/upload-artifact@v4
+      with:
+        name: write-on-paper-backup-${{ steps.date.outputs.date }}
+        path: backups/write-on-paper-${{ steps.date.outputs.date }}.tar.gz
+        retention-days: 30
+        
+    - name: 清理临时文件
+      run: |
+        rm -rf /tmp/httrack-backup
+        
+    - name: 发送备份通知
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "::notice::✅ 备份成功完成 - ${{ steps.date.outputs.date }}"
+          echo "备份文件: write-on-paper-${{ steps.date.outputs.date }}.tar.gz"
+        else
+          echo "::error::❌ 备份失败 - ${{ steps.date.outputs.date }}"
+        fi
